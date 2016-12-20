@@ -14,6 +14,7 @@
 #include <threads.h>
 
 #include "usb-audio.h"
+#include "usb-audio-txring.h"
 
 #define WRITE_REQ_COUNT 20
 
@@ -25,8 +26,6 @@ typedef struct {
     mx_device_t device;
     mx_device_t* usb_device;
     uint8_t ep_addr;
-    uint8_t interface_number;
-    uint8_t alternate_setting;
 
     // pool of free USB requests
     list_node_t free_write_reqs;
@@ -63,8 +62,11 @@ typedef struct {
     // the last signals we reported
     mx_signals_t signals;
 
+    usb_audio_txring_t txring;
 } usb_audio_sink_t;
 #define get_usb_audio_sink(dev) containerof(dev, usb_audio_sink_t, device)
+
+static ssize_t usb_audio_sink_do_write(usb_audio_sink_t* sink, const void* data, size_t length);
 
 static void update_signals(usb_audio_sink_t* sink) {
     mx_signals_t new_signals = 0;
@@ -125,6 +127,11 @@ static uint64_t get_usb_current_frame(usb_audio_sink_t* sink) {
     return result;
 }
 
+static mx_status_t usb_audio_sink_txring_cb(void* data, size_t length, void* cookie) {
+    usb_audio_sink_t* sink = (usb_audio_sink_t *)cookie;
+    return usb_audio_sink_do_write(sink, data, length);
+}
+
 static mx_status_t usb_audio_sink_start(usb_audio_sink_t* sink) {
     mx_status_t status = NO_ERROR;
 
@@ -137,12 +144,11 @@ static mx_status_t usb_audio_sink_start(usb_audio_sink_t* sink) {
         goto out;
     }
 
-    // switch to alternate interface if necessary
-    if (sink->alternate_setting != 0) {
-        usb_set_interface(sink->usb_device, sink->interface_number, sink->alternate_setting);
-    }
     sink->start_usb_frame = 0;
     sink->cur_txn = NULL;
+
+    usb_audio_txring_start(&sink->txring, usb_audio_sink_txring_cb, sink);
+    sink->started = true;
 
 out:
     mtx_unlock(&sink->start_stop_mutex);
@@ -153,18 +159,12 @@ static mx_status_t usb_audio_sink_stop(usb_audio_sink_t* sink) {
     mx_status_t status = NO_ERROR;
 
     mtx_lock(&sink->start_stop_mutex);
-    if (sink->dead) {
-        status = ERR_REMOTE_CLOSED;
-        goto out;
-    }
     if (!sink->started) {
         goto out;
     }
+    sink->started = false;
 
-    // switch back to primary interface
-    if (sink->alternate_setting != 0) {
-        usb_set_interface(sink->usb_device, sink->interface_number, 0);
-    }
+    usb_audio_txring_stop(&sink->txring);
 
 out:
     mtx_unlock(&sink->start_stop_mutex);
@@ -194,13 +194,12 @@ static mx_status_t usb_audio_sink_close(mx_device_t* dev, uint32_t flags) {
     sink->open = false;
     mtx_unlock(&sink->mutex);
     usb_audio_sink_stop(sink);
+    usb_audio_txring_release(&sink->txring);
 
     return NO_ERROR;
 }
 
-static ssize_t usb_audio_sink_write(mx_device_t* dev, const void* data, size_t length, mx_off_t offset) {
-    usb_audio_sink_t* sink = get_usb_audio_sink(dev);
-
+static ssize_t usb_audio_sink_do_write(usb_audio_sink_t* sink, const void* data, size_t length) {
     if (sink->dead) {
         return ERR_REMOTE_CLOSED;
     }
@@ -278,6 +277,11 @@ out:
     return status;
 }
 
+static ssize_t usb_audio_sink_write(mx_device_t* dev, const void* data, size_t length, mx_off_t offset) {
+    usb_audio_sink_t* sink = get_usb_audio_sink(dev);
+    return usb_audio_sink_do_write(sink, data, length);
+}
+
 static ssize_t usb_audio_sink_ioctl(mx_device_t* dev, uint32_t op, const void* in_buf,
                                     size_t in_len, void* out_buf, size_t out_len) {
     usb_audio_sink_t* sink = get_usb_audio_sink(dev);
@@ -331,6 +335,20 @@ static ssize_t usb_audio_sink_ioctl(mx_device_t* dev, uint32_t op, const void* i
         return usb_audio_sink_start(sink);
     case IOCTL_AUDIO_STOP:
         return usb_audio_sink_stop(sink);
+    case IOCTL_AUDIO_SET_BUFFER:
+    case IOCTL_AUDIO_SET_TXRING:
+    case IOCTL_AUDIO_GET_FIFO: {
+        ssize_t result;
+        mtx_lock(&sink->start_stop_mutex);
+        if (sink->started && op != IOCTL_AUDIO_GET_FIFO) {
+            printf("can't change buffers unless audio is stopped\n");
+            result = ERR_BAD_STATE;
+        } else {
+            result = usb_audio_txring_ioctl(&sink->txring, op, in_buf, in_len, out_buf, out_len);
+        }
+        mtx_unlock(&sink->start_stop_mutex);
+        return result;
+    }
     }
 
     return ERR_NOT_SUPPORTED;
@@ -364,6 +382,11 @@ mx_status_t usb_audio_sink_create(mx_driver_t* driver, mx_device_t* device, int 
         printf("Not enough memory for usb_audio_sink_t\n");
         return ERR_NO_MEMORY;
     }
+    mx_status_t status = usb_audio_txring_init(&sink->txring);
+    if (status < 0) {
+        free(sink);
+        return status;
+    }
     sink->sample_rates = usb_audio_parse_sample_rates(format_desc, &sink->sample_rate_count);
     if (!sink->sample_rates) {
         free(sink);
@@ -374,9 +397,11 @@ mx_status_t usb_audio_sink_create(mx_driver_t* driver, mx_device_t* device, int 
 
     sink->usb_device = device;
     sink->ep_addr = ep->bEndpointAddress;
-    sink->interface_number = intf->bInterfaceNumber;
-    sink->alternate_setting = intf->bAlternateSetting;
     int packet_size = usb_ep_max_packet(ep);
+
+    if (intf->bAlternateSetting != 0) {
+        usb_set_interface(sink->usb_device, intf->bInterfaceNumber, intf->bAlternateSetting);
+    }
 
     for (int i = 0; i < WRITE_REQ_COUNT; i++) {
         iotxn_t* txn = usb_alloc_iotxn(sink->ep_addr, packet_size, 0);
@@ -412,7 +437,7 @@ mx_status_t usb_audio_sink_create(mx_driver_t* driver, mx_device_t* device, int 
 
     sink->device.protocol_id = MX_PROTOCOL_AUDIO;
     sink->device.protocol_ops = NULL;
-    mx_status_t status = device_add(&sink->device, sink->usb_device);
+    status = device_add(&sink->device, sink->usb_device);
     if (status != NO_ERROR) {
         printf("device_add failed in usb_audio_sink_create\n");
         usb_audio_sink_release(&sink->device);
