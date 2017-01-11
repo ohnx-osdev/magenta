@@ -101,28 +101,8 @@ protected:
     // get a pointer to a page at a given offset
     friend class VmMapping;
 
-    virtual vm_page_t* GetPageLocked(uint64_t offset) { return nullptr; }
-
     // get the physical address of a page at offset
-    virtual status_t GetPageLocked(uint64_t offset, paddr_t* pa) {
-        auto page = GetPageLocked(offset);
-        if (!page)
-            return ERR_NOT_FOUND;
-        *pa = vm_page_to_paddr(page);
-        return NO_ERROR;
-    }
-
-    // fault in a page at a given offset with PF_FLAGS
-    virtual vm_page_t* FaultPageLocked(uint64_t offset, uint pf_flags) { return nullptr; }
-
-    // fault in a page at a given offset with PF_FLAGS returning the physical address
-    virtual status_t FaultPageLocked(uint64_t offset, uint pf_flags, paddr_t* pa) {
-        auto page = FaultPageLocked(offset, pf_flags);
-        if (!page)
-            return ERR_NOT_FOUND;
-        *pa = vm_page_to_paddr(page);
-        return NO_ERROR;
-    }
+    virtual status_t GetPageLocked(uint64_t offset, uint pf_flags, vm_page_t** page, paddr_t* pa) { return ERR_NOT_SUPPORTED; }
 
     Mutex& lock() { return lock_; }
 
@@ -173,8 +153,7 @@ public:
     status_t CleanInvalidateCache(const uint64_t offset, const uint64_t len) override;
     status_t SyncCache(const uint64_t offset, const uint64_t len) override;
 
-    vm_page_t* GetPageLocked(uint64_t offset) override;
-    vm_page_t* FaultPageLocked(uint64_t offset, uint pf_flags) override;
+    status_t GetPageLocked(uint64_t offset, uint pf_flags, vm_page_t **, paddr_t *) override;
 
 private:
     // private constructor (use Create())
@@ -224,8 +203,7 @@ public:
 
     void Dump(uint depth, bool verbose) override;
 
-    status_t GetPageLocked(uint64_t offset, paddr_t* pa) override;
-    status_t FaultPageLocked(uint64_t offset, uint pf_flags, paddr_t* pa) override;
+    status_t GetPageLocked(uint64_t offset, uint pf_flags, vm_page_t **, paddr_t* pa) override;
 
 private:
     // private constructor (use Create())
