@@ -61,6 +61,8 @@ void register_int_handler(unsigned int vector, int_handler handler, void *arg)
     struct int_handler_struct *h;
     uint cpu = arch_curr_cpu_num();
 
+printf("register_int_handler vector: %u cpu: %u\n", vector, cpu);
+
     spin_lock_saved_state_t state;
 
     if (vector >= MAX_INT)
@@ -168,19 +170,26 @@ void arm_gic_init(void)
 
 status_t arm_gic_sgi(u_int irq, u_int flags, u_int cpu_mask)
 {
+printf("arm_gic_sgi irq: %u flags: %u cpu_mask: %u\n", irq, flags, cpu_mask);
+    if (irq >= 16)
+        return ERR_INVALID_ARGS;
+
+#if 0 //ARM_GIC_V3
+    uint64_t val = cpu_mask | (irq << 24);  
+//    LTRACEF("gic_write_sgi1r: %" PRIx64 "\n", val);
+    printf("gic_write_sgi1r: %" PRIx64 "\n", val);
+    gic_write_sgi1r(val);
+#else
     u_int val =
         ((flags & ARM_GIC_SGI_FLAG_TARGET_FILTER_MASK) << 24) |
         ((cpu_mask & 0xff) << 16) |
         ((flags & ARM_GIC_SGI_FLAG_NS) ? (1U << 15) : 0) |
         (irq & 0xf);
 
-    if (irq >= 16)
-        return ERR_INVALID_ARGS;
-
-    LTRACEF("GICD_SGIR: %x\n", val);
+    printf("GICD_SGIR: %x\n", val);
 
     GICREG(0, GICD_SGIR) = val;
-
+#endif
     return NO_ERROR;
 }
 
@@ -265,6 +274,7 @@ enum handler_return platform_irq(struct iframe *frame)
     THREAD_STATS_INC(interrupts);
 
     uint cpu = arch_curr_cpu_num();
+if (vector != 30) printf("platform_irq vector: %u cpu: %u\n", vector, cpu);
 
     ktrace_tiny(TAG_IRQ_ENTER, (vector << 8) | cpu);
 

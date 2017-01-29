@@ -71,8 +71,8 @@ void arch_mp_init_percpu(void)
     register_int_handler(MP_IPI_GENERIC + GIC_IPI_BASE, &arm_ipi_generic_handler, 0);
     register_int_handler(MP_IPI_RESCHEDULE + GIC_IPI_BASE, &arm_ipi_reschedule_handler, 0);
     mp_set_curr_cpu_online(true);
-    //unmask_interrupt(MP_IPI_GENERIC+ GIC_IPI_BASE);
-    //unmask_interrupt(MP_IPI_RESCHEDULE+ GIC_IPI_BASE);
+unmask_interrupt(MP_IPI_GENERIC+ GIC_IPI_BASE);
+unmask_interrupt(MP_IPI_RESCHEDULE+ GIC_IPI_BASE);
 #elif PLATFORM_BCM28XX
     mp_set_curr_cpu_online(true);
     unmask_interrupt(INTERRUPT_ARM_LOCAL_MAILBOX0);
